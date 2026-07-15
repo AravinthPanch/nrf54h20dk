@@ -1,7 +1,8 @@
 # nrf54h20dk
 
-Minimal Zephyr hello-world application for the **nRF54H20 DK** (PCA10175),
-application core (`cpuapp`). Prints a boot banner over the VCOM0 serial console.
+Minimal Zephyr application for the **nRF54H20 DK** (PCA10175), application core
+(`cpuapp`). Prints a boot banner over the VCOM0 serial console, then reports the state
+of **BUTTON1** (`sw0` / P0.8) on every press/release.
 
 > Freestanding app — it lives **outside** the SDK west workspace
 > (`/opt/nordic/ncs/v3.4.0`), so `ZEPHYR_BASE` must be set when building from the CLI.
@@ -84,7 +85,9 @@ Expected on reset:
 ```
 *** Booting nRF Connect SDK v3.4.0-... ***
 *** Using Zephyr OS v4.4.0-... ***
-Hello from nrf54h20dk on nrf54h20dk/nrf54h20/cpuapp
+Hello from Ara on nrf54h20dk/nrf54h20/cpuapp
+BUTTON1: PRESSED      ← on press
+BUTTON1: released     ← on release
 ```
 
 Only one program can hold VCOM0 at a time — close other terminals first.
@@ -199,6 +202,77 @@ irreversible security state.
 | BICR | Written once at bring-up | Board hardware facts (crystals, power scheme) |
 | App flash | Every build/flash | Your program code + data |
 
+## Board peripherals — finding pins (buttons, LEDs)
+
+Everything about how the DK's buttons and LEDs are wired — pin, electrical config, and
+the friendly `sw0`/`led0` names — lives in the **board devicetree**, not a datasheet. So
+"how is BUTTON1 wired?" is answered by reading the board files, not by guessing.
+
+**Board definitions live at:**
+
+```
+/opt/nordic/ncs/v3.4.0/zephyr/boards/nordic/nrf54h20dk/
+├── nrf54h20dk_nrf54h20_cpuapp.dts   # per-core DT: buttons, leds, aliases  ← the one to read
+├── nrf54h20dk_nrf54h20-common.dtsi  # shared board hardware
+├── nrf54h20dk_nrf54h20-pinctrl.dtsi # pin-mux (UART/SPI/…)
+└── doc/index.rst                    # human-readable silkscreen ↔ pin table
+```
+
+### How to find it
+
+```bash
+# 1. Locate the board folder under ZEPHYR_BASE
+find /opt/nordic/ncs/v3.4.0 -path '*boards*nrf54h20dk*' -name '*.dts*'
+
+# 2. Grep the board files for the button/LED nodes
+grep -rn -iE 'buttons|gpio-keys|sw[0-3]:|button[0-9]|leds|led[0-9]' \
+  /opt/nordic/ncs/v3.4.0/zephyr/boards/nordic/nrf54h20dk/
+```
+
+In `nrf54h20dk_nrf54h20_cpuapp.dts` the `buttons` node declares the pin **and** the
+electrical flags, and the `aliases` block maps the stable `sw0…sw3` names apps use:
+
+```dts
+button0: button_0 {
+    gpios = <&gpio0 8 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;   /* P0.8, pull-up, active-low */
+};
+aliases { sw0 = &button0; ... };
+```
+
+### Button map — mind the off-by-one
+
+The **silkscreen label counts from 1, the devicetree from 0** — so DK "BUTTON1" is
+devicetree `button0` / alias `sw0`. Always confirm which you mean:
+
+| DK silkscreen | Pin   | DT node   | DT alias | `zephyr,code` |
+|---------------|-------|-----------|----------|---------------|
+| **BUTTON1**   | P0.8  | `button0` | `sw0`    | `INPUT_KEY_0` |
+| BUTTON2       | P0.9  | `button1` | `sw1`    | `INPUT_KEY_1` |
+| BUTTON3       | P0.10 | `button2` | `sw2`    | `INPUT_KEY_2` |
+| BUTTON4       | P0.11 | `button3` | `sw3`    | `INPUT_KEY_3` |
+
+All four are **active-low with pull-ups**. The `leds` node (`gpio-leds`, aliases
+`led0…led3`) sits right below `buttons` in the same file — same lookup for LEDs.
+
+### Reading a button in code
+
+Reference the **alias**, not a raw pin, so the code stays portable:
+
+```c
+#include <zephyr/drivers/gpio.h>
+
+/* DK BUTTON1 == alias sw0 (button0, P0.8) */
+static const struct gpio_dt_spec button1 = GPIO_DT_SPEC_GET(DT_ALIAS(sw0), gpios);
+
+gpio_pin_configure_dt(&button1, GPIO_INPUT);
+int val = gpio_pin_get_dt(&button1);   /* logical value: 1 = pressed, 0 = released */
+```
+
+Because the pin is declared `GPIO_ACTIVE_LOW` in devicetree, `gpio_pin_get_dt()` returns
+the **logical** level (1 = pressed) — no manual inversion needed. The `GPIO_PULL_UP` flag
+is applied automatically by `gpio_pin_configure_dt()`. Requires `CONFIG_GPIO=y` in
+`prj.conf`. See `src/main.c` for the polling implementation used here.
+
 ## SoC bring-up (one-time)
 
 The nRF54H20 is a multicore SoC with a hardware **Secure Domain** that boots first and
@@ -291,8 +365,8 @@ Zephyr app root is `src/`.
 nrf54h20dk/
 ├── src/                # Zephyr app root
 │   ├── CMakeLists.txt   # app entry (find_package Zephyr + target_sources)
-│   ├── prj.conf         # Kconfig fragment (CONFIG_PRINTK=y)
-│   ├── main.c           # application entry — printk boot banner, then idle loop
+│   ├── prj.conf         # Kconfig fragment (CONFIG_PRINTK, CONFIG_GPIO)
+│   ├── main.c           # application entry — boot banner, then reports BUTTON1 state
 │   ├── include/         # app headers
 │   ├── drivers/         # out-of-tree drivers
 │   └── boards/          # board overlays / _defconfig

@@ -77,6 +77,102 @@ stale session can lock the port — `screen -wipe` if you hit "Resource busy".)
    Don't use the erase/recover flash options — they could disturb the provisioned
    Secure Domain.
 
+## How the build works
+
+Everyday build concepts (distinct from the one-time bring-up below). The app itself is
+a thin overlay — one source file plus a couple of config lines — that Zephyr compiles
+its kernel, drivers, and startup code *around*.
+
+### The two environment pieces
+
+The CLI build needs both, and they point at different things:
+
+| Variable | Set by | Points at | Provides |
+|----------|--------|-----------|----------|
+| **Toolchain env** | `source <(nrfutil ... toolchain env ...)` | `/opt/nordic/ncs/toolchains/...` | The *tools*: the toolchain's `west`, compiler, CMake, ninja, Zephyr SDK — put on `PATH` for this shell |
+| **`ZEPHYR_BASE`** | `export ZEPHYR_BASE=...` | `/opt/nordic/ncs/v3.4.0/zephyr` | The *OS source tree* your app is compiled into |
+
+- `source <(nrfutil sdk-manager toolchain env --ncs-version v3.4.0 --as-script sh)` —
+  the inner command only *prints* `export` lines; `--as-script sh` formats them as a
+  POSIX script, `<(...)` (process substitution) feeds that output in as a file, and
+  `source` runs it **in the current shell** so the `PATH` changes persist. Hence "once
+  per terminal." (To inspect what it sets, run the inner command alone with
+  `... --as-script sh > toolchain-env.sh`.)
+- **`ZEPHYR_BASE`** is required *only because this app lives outside the west
+  workspace* — it's the `HINTS` that lets CMake find Zephyr (see below). Inside a normal
+  workspace it's discovered automatically.
+
+### What `ZEPHYR_BASE` contains that the app needs
+
+It's the **root of the Zephyr RTOS tree**, not a small include dir. The build reaches
+into it for:
+
+- `cmake/` — **`ZephyrConfig.cmake`**, the file `find_package(Zephyr ...)` searches for;
+  finding it bootstraps the whole build and defines the `app` target.
+- `kernel/`, `lib/`, `subsys/`, `drivers/`, `arch/` — the code compiled *into* the image
+  (scheduler, `k_msleep`, libc, the UART driver behind VCOM0, M33 startup).
+- `include/` — headers; `#include <zephyr/kernel.h>` resolves here.
+- `boards/`, `soc/`, `dts/` — turn the `-b nrf54h20dk/nrf54h20/cpuapp` string into real
+  pin/peripheral/memory config.
+- `Kconfig*` + `scripts/` — the config system your one-line `prj.conf` overrides, plus
+  the devicetree/Kconfig/linker generators.
+
+### `CMakeLists.txt`, line by line
+
+- `find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})` — locates and **bootstraps**
+  Zephyr (defines the `app` target, runs Kconfig + devicetree, sets the toolchain).
+  `REQUIRED` fails the build immediately if not found; `HINTS $ENV{ZEPHYR_BASE}` tells it
+  where to look. Must come before anything references `app`.
+- `target_sources(app PRIVATE src/main.c)` — adds our source to Zephyr's **pre-existing**
+  `app` target (we never `add_executable` — Zephyr owns the executable and link step).
+  `app` is the Zephyr-convention bucket for *your* code vs. the kernel/drivers; `PRIVATE`
+  keeps the source local to the target (always correct for `.c` files).
+
+### Cores — what `cpuapp` means
+
+The board target is `board / soc / core`: `nrf54h20dk/nrf54h20/**cpuapp**`. The nRF54H20
+is a **multicore SoC**, so you must say which core the image runs on:
+
+| Core | Role |
+|------|------|
+| **`cpuapp`** | Application core (Cortex-M33) — where this app runs |
+| `cpurad` | Radio core (Cortex-M33) — BLE / 802.15.4 stack |
+| `cpuppr` | Peripheral Processor (Nordic VPR) — low-power offload |
+| *Secure Domain* | Runs IronSide SE; boots first, then releases `cpuapp` (not a user Zephyr target) |
+
+`CONFIG_BOARD_TARGET` in `main.c` prints this string back on boot.
+
+### sysbuild — why `--sysbuild` is required
+
+**Sysbuild** builds *multiple* coordinated images in one command instead of just the app.
+On the nRF54H20 a bootable system isn't one binary — sysbuild builds the app-core image
+**plus the UICR / multicore-domain artifacts**, keeps their memory maps consistent, and
+merges them for flashing. Without it you'd build only the app `.hex` and miss the pieces
+the chip needs to boot. (Sysbuild is also the standard way to build app + MCUboot
+together.) `build/` gains a nested per-image layout; the app's config still comes from
+`prj.conf`.
+
+### UICR
+
+**User Information Configuration Registers** — a small non-volatile region holding
+**boot-time system configuration** the hardware/IronSide SE read at reset. On the
+nRF54H20 it chiefly encodes the **multicore memory/resource split** (which RAM,
+peripherals, and GPIOs belong to which core). Sysbuild generates it and `west flash`
+programs it alongside the app.
+
+It sits between the permanence extremes: rewritable (unlike the one-way LCS/fuses) but
+rarely changed (unlike app flash). This is why a full **chip erase / recover can wipe
+UICR** and disturb the provisioned Secure Domain — avoid those options; normal
+`west flash` reprograms app flash + the sysbuild-produced UICR without touching the
+irreversible security state.
+
+| Region | Mutability | Holds |
+|--------|-----------|-------|
+| Fuses / LCS | One-way, permanent | Security lifecycle (`EMPTY → RoT`) |
+| **UICR** | Rewritable, rarely | Boot config: multicore memory/resource split |
+| BICR | Written once at bring-up | Board hardware facts (crystals, power scheme) |
+| App flash | Every build/flash | Your program code + data |
+
 ## SoC bring-up (one-time)
 
 The nRF54H20 is a multicore SoC with a hardware **Secure Domain** that boots first and

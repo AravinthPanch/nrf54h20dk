@@ -2,9 +2,8 @@
  * SPDX-License-Identifier: Apache-2.0
  * Copyright (c) 2026 Aravinth Panch
  * Author: Aravinth Panch <ara@aracreate.group>
- *
- * Minimal Zephyr hello-world for the nRF54H20 DK application core (cpuapp):
- * prints a boot banner over VCOM0, then idles.
+ * Description: nRF54H20 DK: application entry (cpuapp) — prints a boot banner over
+ * VCOM0, then idles.
  */
 
 #include <zephyr/kernel.h>

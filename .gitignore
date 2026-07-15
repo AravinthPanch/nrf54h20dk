@@ -1,2 +1,11 @@
-# Zephyr / west build output
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp
+
+# Build (Zephyr / west output)
 build/

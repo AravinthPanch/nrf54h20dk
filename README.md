@@ -28,14 +28,39 @@ Status: ✅ built, flashed, and verified booting on hardware (SN 1051113059).
   [SoC bring-up](#soc-bring-up-one-time) below.
 - `nrfutil` with the `sdk-manager` and `device` components.
 
-## Build & flash (west CLI)
+## Build & flash (make)
+
+The `Makefile` is the entry point — it sets up the toolchain env for you, so no manual
+`source`/`export` per terminal. Run `make` (or `make help`) to see all targets.
+
+```bash
+make build      # incremental build (--sysbuild)
+make pristine   # clean build — after board/config changes
+make flash      # flash onto the DK (SN=1051113059)
+make monitor    # open the VCOM0 serial console
+make dev        # build → flash → monitor in one go
+make clean      # remove build artefacts
+```
+
+Override any config on the CLI, e.g. `make flash SN=1051113059`,
+`make monitor PORT=/dev/tty.usbmodemXXXX`, or `make build BOARD=nrf54h20dk/nrf54h20/cpurad`.
+
+> The `Makefile` uses `eval "$(env -u NRFUTIL_HOME nrfutil sdk-manager toolchain env …)"`
+> rather than `source <(…)`. Two traps it avoids: nrfutil broken-pipes when its stdout is
+> a live process-substitution pipe (leaving `west` off PATH), and a `NRFUTIL_HOME`
+> inherited from a previously-sourced toolchain env makes `nrfutil sdk-manager` fail with
+> "Subcommand not found". See the comment in the `Makefile` for the full explanation.
+
+## Build & flash (west CLI, under the hood)
+
+The app root is `src/` (it holds `CMakeLists.txt` + `prj.conf`), so build from there:
 
 ```bash
 # Once per terminal: pull the NCS toolchain env into this shell + point west at Zephyr
-source <(nrfutil sdk-manager toolchain env --ncs-version v3.4.0 --as-script sh)
+eval "$(env -u NRFUTIL_HOME nrfutil sdk-manager toolchain env --ncs-version v3.4.0 --as-script sh)"
 export ZEPHYR_BASE=/opt/nordic/ncs/v3.4.0/zephyr
 
-# From this app folder:
+cd src
 west build -p -b nrf54h20dk/nrf54h20/cpuapp --sysbuild .   # -p = pristine
 west flash --dev-id 1051113059
 ```
@@ -68,8 +93,9 @@ stale session can lock the port — `screen -wipe` if you hit "Resource busy".)
 
 ## Build & flash (VS Code — nRF Connect extension)
 
-1. **Add application** → open this `nrf54h20dk/` folder. Ensure the active SDK is
-   `/opt/nordic/ncs/v3.4.0` (else the board list is empty).
+1. **Add application** → open the `src/` folder (the Zephyr app root — it holds
+   `CMakeLists.txt` + `prj.conf`). Ensure the active SDK is `/opt/nordic/ncs/v3.4.0`
+   (else the board list is empty).
 2. **Add Build Configuration** → board `nrf54h20dk/nrf54h20/cpuapp`,
    **☑ System build (sysbuild)** → **Build Configuration**.
 3. **Flash** from the Actions panel.
@@ -257,13 +283,40 @@ nrfutil device reset --reset-kind RESET_PIN --serial-number 1051113059
 
 ## Layout
 
+Follows the [araCreate template codebase](../../internal/aracreate-template-codebase)
+conventions (Makefile entry point, `scripts/motd`, `VERSION`, standard folders). The
+Zephyr app root is `src/`.
+
 ```
 nrf54h20dk/
-├── CMakeLists.txt   # Zephyr app entry (find_package Zephyr + target_sources)
-├── prj.conf         # Kconfig fragment (CONFIG_PRINTK=y)
-├── src/main.c       # application entry — printk boot banner, then idle loop
-├── .gitignore       # ignores build/
+├── src/                # Zephyr app root
+│   ├── CMakeLists.txt   # app entry (find_package Zephyr + target_sources)
+│   ├── prj.conf         # Kconfig fragment (CONFIG_PRINTK=y)
+│   ├── main.c           # application entry — printk boot banner, then idle loop
+│   ├── include/         # app headers
+│   ├── drivers/         # out-of-tree drivers
+│   └── boards/          # board overlays / _defconfig
+├── scripts/
+│   └── motd             # ANSI Shadow banner + header (shown by `make help`)
+├── docs/                # documentation
+├── assets/              # images, diagrams, media
+├── tests/               # test suites / prototypes
+├── Makefile             # unified entry point (build / flash / monitor / …)
+├── VERSION              # single source of truth for the version (0.0.1)
+├── .gitignore           # ignores build/
+├── LICENSE              # Apache-2.0
 └── README.md
 ```
 
-`build/` is generated and git-ignored.
+`build/` (created under `src/`) is generated and git-ignored.
+
+## Conventions
+
+See [aracreate-template-codebase](../../internal/aracreate-template-codebase) for the
+shared repo conventions (structure, file headers, Makefile targets, motd, versioning,
+git). Project-specific deviations:
+
+- **License is Apache-2.0** (not the template's proprietary default) — this app is
+  open-source; headers carry `SPDX-License-Identifier: Apache-2.0` and
+  `Copyright (c) 2026 Aravinth Panch`.
+- Firmware targets extend the standard set: `pristine`, `flash`, `monitor`, `dev`.
